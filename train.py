@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 from models.bido import BIDO
 from datasets import get_trainval_datasets
-from utils import CenterLoss, AverageMeter, TopKAccuracyMetric, con_loss, con_loss_mahalanobis, MahalanobisMetric
+from utils import CenterLoss, AverageMeter, TopKAccuracyMetric, con_loss_mahalanobis, MahalanobisMetric
 from torchmetrics import Accuracy, Precision, Recall, F1Score
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
