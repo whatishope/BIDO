@@ -373,7 +373,7 @@ def validate(**kwargs):
             fusion_f1_metric.update(y_pred_fusions, y)
 
 
-    # compute final metrics
+   
     all_preds = torch.cat(all_preds)
     all_labels = torch.cat(all_labels)
     final_acc = accuracy_score(all_labels, all_preds) * 100
@@ -404,7 +404,7 @@ def validate(**kwargs):
     pbar.set_postfix_str('{}, {}'.format(logs['train_info'], batch_info))
     # pbar.set_postfix_str('{}'.format( batch_info))
 
-    # write log for this epoch
+   
     logging.info('       [final] Acc {:.2f}, Prec {:.2f}, Recall {:.2f}, F1 {:.2f}'.format(
         final_acc, final_prec, final_recall, final_f1))
     logging.info('Valid: {}, Time {:3.2f}'.format(batch_info, end_time - start_time))
