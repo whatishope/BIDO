@@ -7,9 +7,7 @@ import torchvision.transforms as transforms
 import config
 
 
-##############################################
-# 通过约束同类样本的特征在特征空间中更接近类中心，同时保持不同类样本之间的距离
-##############################################
+
 class CenterLoss(nn.Module):
     def __init__(self):
         super(CenterLoss, self).__init__()
@@ -135,9 +133,7 @@ class ModelCheckpoint(Callback):
                     'state_dict': state_dict}, self.savepath)
 
 
-##################################
-# transform in dataset
-##################################
+
 def get_transform(resize, phase='train'):
     if phase == 'train':
         return transforms.Compose([
@@ -157,9 +153,7 @@ def get_transform(resize, phase='train'):
         ])
     
 
-##################################
-# contrastive loss
-##################################
+
 def con_loss(features, labels):
     B,_,_=features.shape
     features=F.normalize(features.view(B,-1))
@@ -180,17 +174,12 @@ import torch.nn as nn
 class MahalanobisMetric(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        # self.L = nn.Parameter(torch.randn(dim, dim))  # L: 可学习矩阵
+        # self.L = nn.Parameter(torch.randn(dim, dim))  
         self.L = nn.Parameter(torch.eye(dim) + 0.01 * torch.randn(dim, dim))
 
     def forward(self, x1, x2):
-        """
-        输入:
-          x1, x2: shape [B * B, D]，每对样本特征
-        输出:
-          Mahalanobis 距离: shape [B * B]
-        """
-        M = self.L.T @ self.L  # 构造正定矩阵 M = L^T L
+       
+        M = self.L.T @ self.L  
         diff = x1 - x2  # [B * B, D]
         dist = torch.sum((diff @ M) * diff, dim=1)  # [B * B]
         return dist
@@ -198,67 +187,37 @@ class MahalanobisMetric(nn.Module):
 import torch.nn.functional as F
 
 def con_loss_mahalanobis(features, labels, metric, margin=0.4, pos_weight=1.0, neg_weight=1.0):
-    """
-    参数:
-        features: [B, D]  → 每个样本的嵌入向量
-        labels:   [B]     → 标签，用于构造正负样本对
-        metric:   MahalanobisMetric 实例
-    返回:
-        对比损失（scalar）
-    """
+    
     B = features.size(0)
     labels = labels.view(-1, 1)
 
-    # 构造正负样本掩码
+  
     pos_mask = (labels == labels.T).float()
     neg_mask = 1.0 - pos_mask
     diag = torch.eye(B, device=features.device)
     pos_mask -= diag
     neg_mask *= (1 - diag)
 
-    # 展开特征组合：构造所有特征对
+    
     feat1 = features.unsqueeze(1).expand(B, B, -1).reshape(-1, features.size(1))  # [B*B, D]
     feat2 = features.unsqueeze(0).expand(B, B, -1).reshape(-1, features.size(1))  # [B*B, D]
 
-    # print("L requires_grad:", metric.L.requires_grad)  # 应该为 True
+    # print("L requires_grad:", metric.L.requires_grad) 
 
 
-    # Mahalanobis 距离
+ 
     dists = metric(feat1, feat2).reshape(B, B)  # [B, B]
 
-    # 正对损失：距离应越小越好
+   
     pos_loss = dists * pos_mask
     pos_loss = pos_loss.sum() / (pos_mask.sum() + 1e-8)
 
-    # 负对损失：希望距离大于 margin，超过 margin 不再惩罚
+   
     neg_margin = torch.clamp(margin - dists, min=0.0)
     neg_loss = neg_margin * neg_mask
     neg_loss = neg_loss.sum() / (neg_mask.sum() + 1e-8)
 
     loss = pos_weight * pos_loss + neg_weight * neg_loss
-    return loss
-
-
-
-
-
-def cosface_loss(feature1, feature2, labels=None, m=0.5, s=64):
-    '''
-    feature1与feature2是来自两个不同模态的特征或不同增强的特征
-    feature1, feature2: shape (n, d)
-    labels是feature1与feature2的对应关系,如果本来就是成对的,传入None
-    labels: shape (n,), default value [0,1,2,...,n-1]
-    m: 不同样本间的 margin, m大可以使不同样本间区分度更高,同时更难收敛,可以根据实际情况调整
-    s: 缩放因子(Scale),放大logits的梯度,通常设为较大的值(如64)
-    '''
-    if labels is None:
-        labels = torch.arange(len(feature1)).to(feature1.device)
-    feature1 = F.normalize(feature1)
-    feature2 = F.normalize(feature2)
-    cos_sim = feature1 @ feature2.T
-    cos_sim[torch.arange(len(labels)),labels] -= math.sin(m)*m
-    cos_sim = cos_sim * s
-    loss = F.cross_entropy(cos_sim, labels)
     return loss
 
 
