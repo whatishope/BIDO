@@ -4,7 +4,7 @@ import config
 import logging
 import warnings
 
-os.environ["WANDB_MODE"] = "offline"  # 离线运行 wandb
+os.environ["WANDB_MODE"] = "offline"  
 import wandb
 from tqdm import tqdm
 
@@ -118,7 +118,7 @@ def main(attn_weight=1.0, fusion_weight=1.0, con_weight=0.1, xml_weight=0.1):
     ##################################
     # Optimizer, LR Scheduler
     ##################################
-    metric = MahalanobisMetric(dim=768).to(device)  # 初始化一次
+    metric = MahalanobisMetric(dim=768).to(device) 
     learning_rate = logs['lr'] if 'lr' in logs else config.learning_rate
     # optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate, momentum=0.9, weight_decay=1e-5)
     optimizer = torch.optim.SGD(
@@ -237,7 +237,7 @@ def train(**kwargs):
     loss_container.reset()
     # raw_metric.reset()
     attn_metric.reset()
-    fusion_metric.reset()  # 加一个多模态分支的metric
+    fusion_metric.reset()  
 
     # begin training
     start_time = time.time()
@@ -270,7 +270,7 @@ def train(**kwargs):
         loss_xml = cross_entropy_loss(xml_cls, y)
 
 
-        # 加权总损失
+      
         loss_attn = cross_entropy_loss(F.normalize(y_pred_attn, dim=-1), y)
         batch_loss = (
                 attn_weight * loss_attn +
