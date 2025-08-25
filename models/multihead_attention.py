@@ -3,12 +3,6 @@ import torch.nn.functional as F
 from torch import nn
 
 class AttentionLayer(nn.Module):
-    '''
-    为每一个特征图中的元素分配注意力，但是没有考虑通道间的注意力情况
-    model_dim:输入数据维度
-    num_heads:注意力头数
-    mask:是否需要掩码
-    '''
     def __init__(self, model_dim, num_heads=8, mask=False):
         super().__init__()
 
