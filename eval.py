@@ -2,17 +2,12 @@ import os
 import logging
 import warnings
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import transforms
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import config
 from models.bido import BIDO
-from datasets import get_trainval_datasets
-# from utils import TopKAccuracyMetric, batch_augment
-from utils import TopKAccuracyMetric
 from torchmetrics import Accuracy, Precision, Recall, F1Score
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from datasets.TestDataset import TestDataset
@@ -23,18 +18,6 @@ assert torch.cuda.is_available()
 os.environ['CUDA_VISIBLE_DEVICES'] = config.GPU
 device = torch.device("cuda")
 torch.backends.cudnn.benchmark = True
-
-# visualize
-visualize = config.visualize
-savepath = config.eval_savepath
-if visualize:
-    os.makedirs(savepath, exist_ok=True)
-
-ToPILImage = transforms.ToPILImage()
-MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-
-
 
 def main():
     logging.basicConfig(
@@ -48,47 +31,27 @@ def main():
         logging.info('Set ckpt for evaluation in config.py')
         return
 
-    ##################################
-    # Dataset for testing
-    ##################################
-    # _, test_dataset = get_trainval_datasets(config.tag, resize=config.image_size)
-    # test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False,
-    #                          num_workers=2, pin_memory=True)
     test_dataset = TestDataset(
-        dex_dir='./android_software_2016/2019/test',
-        xml_dir='./android_software_2016/2019/xml_images_test',
+        dex_dir='/home/user/android_obf_t_v/test',
+        xml_dir='/home/user/android_obf_t_v/xml_images',
         resize=config.image_size
     )
 
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False,
                              num_workers=2, pin_memory=True)
 
-    ##################################
-    # Initialize model
-    ##################################
     net = BIDO(num_classes=2, M=config.num_attentions, net=config.net, pretrained=True, num_attn_layers=config.num_attn_layers, D_xml=config.D_xml)
 
-
-    # Load ckpt and get state_dict
     checkpoint = torch.load(ckpt)
     state_dict = checkpoint['state_dict']
 
-    # Load weights
     net.load_state_dict(state_dict)
     logging.info('Network loaded from {}'.format(ckpt))
-
-    ##################################
-    # use cuda
-    ##################################
-    # net.to(device)
-    # if torch.cuda.device_count() > 1:
-    #     net = nn.DataParallel(net)
-
-
 
     raw_accuracy = Accuracy(task='binary')
     acc_p3 = Accuracy(task='binary')
 
+    # 初始化
     raw_accuracy.reset()
     acc_p3.reset()
 
@@ -99,8 +62,22 @@ def main():
     recall_metric.reset()
     f1_metric.reset()
 
+    # GC 头的指标
+    gc_acc_metric = Accuracy(task='binary')
+    gc_prec_metric = Precision(task='binary')
+    gc_recall_metric = Recall(task='binary')
+    gc_f1_metric = F1Score(task='binary')
+
+    gc_acc_metric.reset()
+    gc_prec_metric.reset()
+    gc_recall_metric.reset()
+    gc_f1_metric.reset()
+
     all_preds = []
     all_labels = []
+
+    fi_agree_sum = 0
+    fi_total = 0
 
     net.eval()
     with torch.no_grad():
@@ -111,12 +88,10 @@ def main():
             # xml_feats = xml_feats.to(device)
             # y = y.to(device)
 
-
-            _, y_pred_attn, _ , fusion_pred, xml_pred= net(X, xml_feats)
+            _, y_pred_attn, _ , fusion_pred, xml_pred, p_gc, z_gc, log_det = net(X, xml_feats)
 
             preds = torch.argmax(y_pred_attn, dim=1)
             raw_accuracy.update(preds, y)
-
 
             fusion_preds = torch.argmax(fusion_pred, dim=1)
             acc_p3.update(fusion_preds, y)
@@ -124,18 +99,24 @@ def main():
             recall_metric.update(fusion_preds, y)
             f1_metric.update(fusion_preds, y)
 
+            gc_preds = torch.argmax(p_gc, dim=1)
+            gc_acc_metric.update(gc_preds, y)
+            gc_prec_metric.update(gc_preds, y)
+            gc_recall_metric.update(gc_preds, y)
+            gc_f1_metric.update(gc_preds, y)
+
             final_prob = (
-                    1 * F.softmax(y_pred_attn, dim=1) +
-                    1 * F.softmax(fusion_pred, dim=1) +
-                    0.1 * F.softmax(xml_pred, dim=1)
+                    1 * F.softmax(p_gc, dim=1) +
+                    1 * F.softmax(fusion_pred, dim=1)
             )
             final_pred = torch.argmax(final_prob, dim=1)
+
+            fi_agree_sum += (fusion_preds == gc_preds).sum().item()
+            fi_total += y.size(0)
 
             all_preds.append(final_pred.cpu())
             all_labels.append(y.cpu())
 
-            # end of this batch
-            acc1_batch = raw_accuracy.compute().item() * 100
             acc3_batch = acc_p3.compute().item() * 100
             batch_info = f'Val Acc: Raw Top-1 {acc1_batch:.2f}%, Fusion Top-1 {acc3_batch:.2f}%'
             pbar.update()
@@ -149,7 +130,11 @@ def main():
         fusion_recall = recall_metric.compute().item() * 100
         fusion_f1 = f1_metric.compute().item() * 100
 
-        # compute final metrics
+        gc_acc = gc_acc_metric.compute().item() * 100
+        gc_prec = gc_prec_metric.compute().item() * 100
+        gc_recall = gc_recall_metric.compute().item() * 100
+        gc_f1 = gc_f1_metric.compute().item() * 100
+
         all_preds = torch.cat(all_preds)
         all_labels = torch.cat(all_labels)
         final_acc = accuracy_score(all_labels, all_preds) * 100
@@ -157,10 +142,15 @@ def main():
         final_prec = precision_score(all_labels, all_preds, average='binary') * 100
         final_recall = recall_score(all_labels, all_preds, average='binary') * 100
 
+        fi = 100.0 * fi_agree_sum / max(1, fi_total)
+
+        print(f"FI (Fusion vs GC agreement): {fi:.2f}%")
+        logging.info(f"[EVAL] FI_agree(fusion,gc)={fi:.2f}%")
+
         print("\n=== Evaluation Results ===")
-        print(f"Accuracy p3 (fusion)   : Top-1 {acc3:.2f}%")
-        print(f"Fusion Metrics         : Precision {fusion_prec:.2f}%, Recall {fusion_recall:.2f}%, F1 {fusion_f1:.2f}%")
-        print(f"Final Metrics         : accuracy {final_acc:.2f}%, Precision {final_prec:.2f}%, Recall {final_recall:.2f}%, F1 {final_f1:.2f}%")
+        print(f"Fusion Metrics         : Acc {acc3:.2f}%, Precision {fusion_prec:.2f}%, Recall {fusion_recall:.2f}%, F1 {fusion_f1:.2f}%")
+        print(f"GC Metrics             : Acc {gc_acc:.2f}%, Precision {gc_prec:.2f}%, Recall {gc_recall:.2f}%, F1 {gc_f1:.2f}%")
+        print(f"Final Metrics          : Acc {final_acc:.2f}%, Precision {final_prec:.2f}%, Recall {final_recall:.2f}%, F1 {final_f1:.2f}%")
 
 
 if __name__ == '__main__':
