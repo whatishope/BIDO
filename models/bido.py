@@ -10,6 +10,7 @@ from torchvision.models import resnet18
 from models.inception import inception_v3, BasicConv2d
 from models.multihead_attention import SelfAttentionLayer as SAL
 from torch.nn import MultiheadAttention
+from models.SmallGlowFlow import SmallGlowFlow
 
 import os
 import sys
@@ -20,8 +21,6 @@ import config
 
 EPSILON = 1e-12 
 
-
-# Bilinear Attention Pooling
 class BAP(nn.Module):
     def __init__(self, pool='GAP'):
         super(BAP, self).__init__()
@@ -35,7 +34,6 @@ class BAP(nn.Module):
         B, C, H, W = features.size()
         _, M, AH, AW = attentions.size()
 
-        # match size
         if AH != H or AW != W:
             attentions = F.upsample_bilinear(attentions, size=(H, W))
 
@@ -66,7 +64,6 @@ class AMG(nn.Module):
         # x = self.softmax(x)
         return x
 
-# BIDO: Image-based Interpretable Malware Detector
 class BIDO(nn.Module):
     def __init__(self, num_classes, M=32, net='inception_mixed_6e', pretrained=False, num_attn_layers=3, D_xml=512):
         super(BIDO, self).__init__()
@@ -82,7 +79,6 @@ class BIDO(nn.Module):
             ]
         )
 
-        # Network Initialization
         if 'inception' in net:
             if net == 'inception_mixed_6e':
                 self.features = inception_v3(pretrained=pretrained).get_features_mixed_6e()
@@ -93,19 +89,15 @@ class BIDO(nn.Module):
             else:
                 raise ValueError('Unsupported net: %s' % net)
 
-
         self.attentions = BasicConv2d(self.num_features, self.M, kernel_size=1)
         self.amg = AMG(self.num_features, self.M)
-
 
         self.bap = BAP(pool='GAP')
 
         self.dropout = torch.nn.Dropout(config.drop_rate)
 
-
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.num_features))  # [1, 1, 768]
         self.pos_embedding = nn.Parameter(torch.zeros(1, self.M + 1, self.num_features))  # [1, 33, 768]
-
 
         self.fc = nn.Linear(self.num_features, self.num_classes, bias=False)
 
@@ -114,12 +106,16 @@ class BIDO(nn.Module):
         self.fc2 = nn.Linear((self.M + 1) * self.num_features, self.num_classes, bias=False)
 
         self.fusion_fc = nn.Linear((self.M + 1) * self.num_features * self.D_xml, self.num_classes,
-                                   bias=False)  # Fusion output
+                                   bias=False)
+
+        self.gc_dim = 512
+
+        self.mu_gc = nn.Parameter(torch.randn(num_classes, self.gc_dim))
 
         self.xml_cnn = resnet18(pretrained=True)
         self.xml_cnn.fc = nn.Identity()  # [B, 512]
 
-        self.xml_proj = nn.Linear(512, D_xml)  # [B, D_xml]
+        self.xml_proj = nn.Linear(512, D_xml)
 
         self.emb_proj = nn.Sequential(
             nn.Linear(25344, 8192),
@@ -134,11 +130,7 @@ class BIDO(nn.Module):
             nn.LayerNorm(512)
         )
 
-        self.fused_att = MultiheadAttention(embed_dim=D_xml, num_heads=8,batch_first=True)  # batch_first=True
         self.fused_fc = nn.Linear(512 * self.D_xml, self.num_classes)
-
-        self.cross_attn_fusion = nn.MultiheadAttention(embed_dim=512, num_heads=8, batch_first=True)
-        self.fusion_fc = nn.Linear(512, self.num_classes)
 
         self.fusion_c_fc = nn.Linear(1024, num_classes)
 
@@ -147,18 +139,29 @@ class BIDO(nn.Module):
         logging.info(
             'IIDM: using {} as feature extractor, num_classes: {}, num_attentions: {}'.format(net, self.num_classes,
                                                                                               self.M))
+        self.gc_dim = 512
+        self.small_flow = SmallGlowFlow(
+            dim=self.gc_dim,
+            hidden_dim=512,
+            n_blocks=2,
+            clamp=2.,
+            act_norm=1.,
+            act_norm_type='SOFTPLUS',
+            permute_soft=True
+        )
+
+        self.mu_gc = nn.Parameter(torch.randn(num_classes, self.gc_dim))
+        nn.init.normal_(self.mu_gc, mean=0.0, std=0.02)
 
     def forward(self, x, x_xml_img):
         batch_size = x.size(0)
 
-        feature_maps = self.features(x) #torch.Size([16, 768, 26, 26])
-        # print(feature_maps.shape)
+        feature_maps = self.features(x)
         if self.net != 'inception_mixed_7c':
             attention_maps = self.amg(feature_maps)
         else:
             attention_maps = feature_maps[:, :self.M, ...]
         feature_matrix = self.bap(feature_maps, attention_maps)
-
         p1 = self.fc1(F.normalize(feature_matrix.view(batch_size, -1), dim=-1) * 100.)
 
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # [B, 1, 768]
@@ -167,44 +170,28 @@ class BIDO(nn.Module):
 
         for attn in self.atten_layer:
             embeddings = attn(embeddings)
-
         p2 = self.fc2(F.normalize(embeddings.view(batch_size, -1), dim=-1) * 100.)
 
-        # XML image features
         xml_feat = self.xml_cnn(x_xml_img) # [B, 512]
+
         xml_cls = self.xml_fc(xml_feat)
-
-
 
         emb_flat = embeddings.view(batch_size, -1) # [B, 25344]
         emb_flat = self.emb_proj(emb_flat)  # [B, 512]
-        fused_feats = torch.bmm(emb_flat.unsqueeze(2), xml_feat.unsqueeze(1))  # [B, (M+1)*C, D_xml]
 
+        z_gc, log_det = self.small_flow(emb_flat, rev=False)
+
+        z_expand = z_gc.unsqueeze(1)
+        mu_expand = self.mu_gc.unsqueeze(0)
+        dist_sq = torch.sum((z_expand - mu_expand) ** 2, dim=-1)
+
+        p_gc = -0.5 * dist_sq
+
+        fused_feats = torch.bmm(emb_flat.unsqueeze(2), xml_feat.unsqueeze(1))
         fused_flat = fused_feats.reshape(batch_size, -1)
         p3 = self.fused_fc(fused_flat)
-        # p3 = self.fusion_fc(fused_flat)
 
-        # p3 = self.fusion_fc(fused_feats)
+        return p1, p2, embeddings, p3, xml_cls, p_gc, z_gc, log_det
 
-        # [B, N, D_xml]，N=(M+1)*C
-        # fused_feats = self.fused_transformer(fused_feats)
-
-
-        return p1, p2, embeddings, p3, xml_cls
-
-    def load_state_dict(self, state_dict, strict=True):
-        model_dict = self.state_dict()
-        pretrained_dict = {k: v for k, v in state_dict.items()
-                           if k in model_dict and model_dict[k].size() == v.size()}
-
-        if len(pretrained_dict) == len(state_dict):
-            logging.info('%s: All params loaded' % type(self).__name__)
-        else:
-            logging.info('%s: Some params were not loaded:' % type(self).__name__)
-            not_loaded_keys = [k for k in state_dict.keys() if k not in pretrained_dict.keys()]
-            logging.info(('%s, ' * (len(not_loaded_keys) - 1) + '%s') % tuple(not_loaded_keys))
-
-        model_dict.update(pretrained_dict)
-        super(BIDO, self).load_state_dict(model_dict)
 
 
