@@ -391,4 +391,4 @@ if __name__ == '__main__':
     #     main(**params)
     #     wandb.finish()
 
-    # nohup python train.py > train.log 2>&1 &
+
