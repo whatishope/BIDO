@@ -21,11 +21,11 @@ beta = 5e-2
 ##################################################
 # Dataset/Path Config
 ##################################################
-tag = 'bird'             
+      
 
 
 save_dir = './IIMD/'
-model_name = 'best_model.pth'
+model_name = 'best_final_model.pth'
 log_name = 'train.log'
 
 
